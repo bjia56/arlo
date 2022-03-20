@@ -43,6 +43,8 @@ class EventStream(object):
         self.heartbeat_handler = heartbeat_handler
         self.thread_counter = thread_counter
 
+        print(f"EventStream with thread counter {self.thread_counter}")
+
         thread_counter += 1
  
     def __del__(self):

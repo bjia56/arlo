@@ -44,11 +44,14 @@ import re
 import requests
 import signal
 import time
+import threading
 
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 #logging.basicConfig(level=logging.DEBUG,format='[%(levelname)s] (%(threadName)-10s) %(message)s',)
+
+email_lock = threading.Lock()
 
 class Arlo(object):
     BASE_URL = 'my.arlo.com'
@@ -177,109 +180,110 @@ class Arlo(object):
         return body
 
     def LoginMFA(self, username, password, google_credential_file):
-        self.username = username
-        self.password = password
-        self.google_credentials = pickle.load(open(google_credential_file, 'rb'))
-        self.request = Request()
+        with email_lock:
+            self.username = username
+            self.password = password
+            self.google_credentials = pickle.load(open(google_credential_file, 'rb'))
+            self.request = Request()
 
-        # request MFA token
-        request_start_time = int(time.time())
+            # request MFA token
+            request_start_time = int(time.time())
 
-        headers = {
-            'DNT': '1',
-            'schemaVersion': '1',
-            'Auth-Version': '2',
-            'Content-Type': 'application/json; charset=UTF-8',
-            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 11_1_2 like Mac OS X) AppleWebKit/604.3.5 (KHTML, like Gecko) Mobile/15B202 NETGEAR/v1 (iOS Vuezone)',
-            'Origin': f'https://{self.BASE_URL}',
-            'Referer': f'https://{self.BASE_URL}/',
-            'Source': 'arloCamWeb',
-            'TE': 'Trailers',
-        }
+            headers = {
+                'DNT': '1',
+                'schemaVersion': '1',
+                'Auth-Version': '2',
+                'Content-Type': 'application/json; charset=UTF-8',
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 11_1_2 like Mac OS X) AppleWebKit/604.3.5 (KHTML, like Gecko) Mobile/15B202 NETGEAR/v1 (iOS Vuezone)',
+                'Origin': f'https://{self.BASE_URL}',
+                'Referer': f'https://{self.BASE_URL}/',
+                'Source': 'arloCamWeb',
+                'TE': 'Trailers',
+            }
 
-        # Authenticate
-        auth_body = self.request.post(
-                f'https://{self.AUTH_URL}/api/auth',
-            params={
-                'email': self.username,
-                'password': str(base64.b64encode(self.password.encode('utf-8')), 'utf-8'),
-                'language': 'en',
-                'EnvSource': 'prod'
-            },
-            headers=headers,
-            raw=True
-        )
-        self.user_id = auth_body['data']['userId']
-        self.request.session.headers.update({'Authorization': base64.b64encode(auth_body['data']['token'].encode('utf-8'))})
+            # Authenticate
+            auth_body = self.request.post(
+                    f'https://{self.AUTH_URL}/api/auth',
+                params={
+                    'email': self.username,
+                    'password': str(base64.b64encode(self.password.encode('utf-8')), 'utf-8'),
+                    'language': 'en',
+                    'EnvSource': 'prod'
+                },
+                headers=headers,
+                raw=True
+            )
+            self.user_id = auth_body['data']['userId']
+            self.request.session.headers.update({'Authorization': base64.b64encode(auth_body['data']['token'].encode('utf-8'))})
 
-        # Retrieve email factor id
-        factors_body = self.request.get(
-            f'https://{self.AUTH_URL}/api/getFactors',
-            params={'data': auth_body['data']['issued']},
-            headers=headers,
-            raw=True
-        )
-        email_factor_id = next(i for i in factors_body['data']['items'] if i['factorType'] == 'EMAIL' and i['factorRole'] == "PRIMARY")['factorId']
+            # Retrieve email factor id
+            factors_body = self.request.get(
+                f'https://{self.AUTH_URL}/api/getFactors',
+                params={'data': auth_body['data']['issued']},
+                headers=headers,
+                raw=True
+            )
+            email_factor_id = next(i for i in factors_body['data']['items'] if i['factorType'] == 'EMAIL' and i['factorRole'] == "PRIMARY")['factorId']
 
-        # Start factor auth
-        start_auth_body = self.request.post(
-            f'https://{self.AUTH_URL}/api/startAuth',
-            {'factorId': email_factor_id},
-            headers=headers,
-            raw=True
-        )
-        factor_auth_code = start_auth_body['data']['factorAuthCode']
+            # Start factor auth
+            start_auth_body = self.request.post(
+                f'https://{self.AUTH_URL}/api/startAuth',
+                {'factorId': email_factor_id},
+                headers=headers,
+                raw=True
+            )
+            factor_auth_code = start_auth_body['data']['factorAuthCode']
 
-        # search for MFA token in latest emails
-        pattern = '\d{6}'
-        code = None
-        service = build('gmail', 'v1', credentials = self.google_credentials)
+            # search for MFA token in latest emails
+            pattern = '\d{6}'
+            code = None
+            service = build('gmail', 'v1', credentials = self.google_credentials)
 
-        for i in range(0, 10):
-            time.sleep(5)
-            messages = service.users().messages().list(
-                userId='me',
-                q=f'from:do_not_reply@arlo.com after:{request_start_time}'
-            ).execute()
+            for i in range(0, 10):
+                time.sleep(5)
+                messages = service.users().messages().list(
+                    userId='me',
+                    q=f'from:do_not_reply@arlo.com after:{request_start_time}'
+                ).execute()
 
-            if messages['resultSizeEstimate'] == 0:
-                print('no matching emails found')
-                continue
+                if messages['resultSizeEstimate'] == 0:
+                    print('no matching emails found')
+                    continue
 
-            # only check the latest message
-            message = service.users().messages().get(userId='me', id=messages['messages'][0]['id']).execute()
-            search = re.search(pattern, message['snippet'])
-            if not search:
-                print('no matching code in email found')
-                continue
+                # only check the latest message
+                message = service.users().messages().get(userId='me', id=messages['messages'][0]['id']).execute()
+                search = re.search(pattern, message['snippet'])
+                if not search:
+                    print('no matching code in email found')
+                    continue
 
-            code = search.group(0)
-            break
+                code = search.group(0)
+                break
 
-        """
-        code = input("Enter MFA code:\n")
-        print("CODE", factor_auth_code)
-        """
+            """
+            code = input("Enter MFA code:\n")
+            print("CODE", factor_auth_code)
+            """
 
-        # Complete auth
-        finish_auth_body = self.request.post(
-            f'https://{self.AUTH_URL}/api/finishAuth',
-            {
-                'factorAuthCode': factor_auth_code,
-                'otp': code
-            },
-            headers=headers,
-            raw=True
-        )
+            # Complete auth
+            finish_auth_body = self.request.post(
+                f'https://{self.AUTH_URL}/api/finishAuth',
+                {
+                    'factorAuthCode': factor_auth_code,
+                    'otp': code
+                },
+                headers=headers,
+                raw=True
+            )
 
-        # Update Authorization code with new code
-        headers = {
-            'Auth-Version': '2',
-            'Authorization': finish_auth_body['data']['token'].encode('utf-8'),
-            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 11_1_2 like Mac OS X) AppleWebKit/604.3.5 (KHTML, like Gecko) Mobile/15B202 NETGEAR/v1 (iOS Vuezone)',
-        }
-        self.request.session.headers.update(headers)
-        self.BASE_URL = 'myapi.arlo.com'
+            # Update Authorization code with new code
+            headers = {
+                'Auth-Version': '2',
+                'Authorization': finish_auth_body['data']['token'].encode('utf-8'),
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 11_1_2 like Mac OS X) AppleWebKit/604.3.5 (KHTML, like Gecko) Mobile/15B202 NETGEAR/v1 (iOS Vuezone)',
+            }
+            self.request.session.headers.update(headers)
+            self.BASE_URL = 'myapi.arlo.com'
 
     def Logout(self):
         self.Unsubscribe()
