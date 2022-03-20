@@ -26,9 +26,13 @@ else:
 
 # TODO: There's a lot more refactoring that could/should be done to abstract out the arlo-specific implementation details.
 
+thread_counter = 0
+
 class EventStream(object):
     """This class provides a queue-based EventStream object."""
     def __init__(self, event_handler, heartbeat_handler, args):
+        global thread_counter
+
         self.event_handler = event_handler
         self.connected = False
         self.registered = False
@@ -37,6 +41,9 @@ class EventStream(object):
         self.event_stream_stop_event = threading.Event()
         self.arlo = args[0]
         self.heartbeat_handler = heartbeat_handler
+        self.thread_counter = thread_counter
+
+        thread_counter += 1
  
     def __del__(self):
         self.Disconnect()
@@ -73,7 +80,7 @@ class EventStream(object):
     def Start(self):
         try:
             event_stream = sseclient.SSEClient('https://myapi.arlo.com/hmsweb/client/subscribe?token='+self.arlo.request.session.headers.get('Authorization').decode(), session=self.arlo.request.session)
-            self.event_stream_thread = threading.Thread(name="EventStream", target=self.event_handler, args=(self.arlo, event_stream, self.event_stream_stop_event, ))
+            self.event_stream_thread = threading.Thread(name=f"EventStream{self.thread_counter}", target=self.event_handler, args=(self.arlo, event_stream, self.event_stream_stop_event, ))
             self.event_stream_thread.setDaemon(True)
             self.event_stream_thread.start()
         except Exception as e:
@@ -91,7 +98,7 @@ class EventStream(object):
 
     def Register(self):
         try:
-            self.heartbeat_thread = threading.Thread(name='HeartbeatThread', target=self.heartbeat_handler, args=(self.arlo, self.heartbeat_stop_event, ))
+            self.heartbeat_thread = threading.Thread(name=f'HeartbeatThread{self.thread_counter}', target=self.heartbeat_handler, args=(self.arlo, self.heartbeat_stop_event, ))
             self.heartbeat_thread.setDaemon(True)
             self.heartbeat_thread.start()
             self.registered = True
